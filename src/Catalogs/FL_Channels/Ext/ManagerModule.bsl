@@ -24,14 +24,13 @@
 // Returns a processing result.
 //
 // Parameters:
-//  AppProperties - Structure - see function Catalogs.FL_Channels.NewAppEndpointProperties.
-//  Payload       - Arbitrary - payload.
-//  Properties    - Structure - see function Catalogs.FL_Exchanges.NewProperties.
+//  AppProperties - Structure - see function Catalogs.FL_Channels.NewAppProperties.
+//  Invocation    - Structure - see function Catalogs.FL_Messages.NewInvocation.
 //
 // Returns:
 //  Structure - see fucntion Catalogs.FL_Jobs.NewJobResult. 
 //
-Function ProcessMessage(AppProperties, Payload, Properties) Export
+Function ProcessMessage(AppProperties, Invocation) Export
     
     JobResult = Catalogs.FL_Jobs.NewJobResult();
     JobResult.AppEndpoint = AppProperties.AppEndpoint;
@@ -88,14 +87,15 @@ Function ProcessMessage(AppProperties, Payload, Properties) Export
         AppEndpointProcessor.EncryptedData.Load(
             AppEndpointSettings.EncryptedData.Unload());
                     
-        AppEndpointProcessor.DeliverMessage(Payload, Properties, JobResult);      
+        AppEndpointProcessor.DeliverMessage(Invocation, JobResult);      
             
     Except
-                    
+        
+        ErrorInformation = ErrorInfo();
         FL_InteriorUse.WriteLog("FoxyLink.Integration.ProcessMessage", 
             EventLogLevel.Error,
             Metadata.Catalogs.FL_Channels,
-            ErrorDescription(), 
+            ErrorInformation, 
             JobResult);
     
     EndTry;
@@ -122,12 +122,21 @@ Function AvailableChannels() Export
         If Metadata.DataProcessors.Contains(Item) Then
             
             Try
-            
-                DataProcessor = DataProcessors[Item.Name].Create();                
-                ValueList.Add(DataProcessor.LibraryGuid(),
-                    StrTemplate("%1 (ver. %2)", 
-                        DataProcessor.ChannelFullName(),
-                        DataProcessor.Version()));
+                
+                PresentationTemplate = NStr("en='%1 (ver. %2)';
+                    |ru='%1 (вер. %2)';
+                    |uk='%1 (вер. %2)';
+                    |en_CA='%1 (ver. %2)'");
+                
+                DataProcessor = DataProcessors[Item.Name].Create();
+                LibraryGuid = DataProcessor.LibraryGuid();
+                ChannelName = DataProcessor.ChannelFullName();
+                Version = DataProcessor.Version();
+                
+                Presentation = StrTemplate(PresentationTemplate, ChannelName, 
+                    Version);
+                
+                ValueList.Add(LibraryGuid, Presentation);
             
             Except
                 
@@ -264,21 +273,22 @@ EndFunction // NewChannelParameters()
 //
 // Returns:
 //  Structure - app endpoint properties with keys:
-//      * AppEndpoint  - CatalogRef.FL_Channels - reference to the app endpoint.
-//      * AppResources - ValueTable             - build from the mock app resources table. 
+//      * AppEndpoint  - CatalogRef.FL_Channels  - reference to the app endpoint.
+//                     - CatalogRef.FL_Exchanges - reference to the data composition app endpoint.
+//      * AppResources - ValueTable              - build from the mock app resources table. 
 //
-Function NewAppEndpointProperties() Export
+Function NewAppProperties() Export
     
     AppResources = Metadata.Catalogs.FL_Channels.TabularSections.AppResources;
     
-    AppEndpointProperties = New Structure;
-    AppEndpointProperties.Insert("AppEndpoint");
-    AppEndpointProperties.Insert("AppResources", FL_CommonUse
+    AppProperties = New Structure;
+    AppProperties.Insert("AppEndpoint");
+    AppProperties.Insert("AppResources", FL_CommonUse
         .NewMockOfMetadataObjectAttributes(AppResources));
     
-    Return AppEndpointProperties;
+    Return AppProperties;
     
-EndFunction // NewAppEndpointProperties()
+EndFunction // NewAppProperties()
 
 #EndRegion // ProgramInterface
 
@@ -302,7 +312,7 @@ EndFunction // NewChannelParametersStructure()
 // 
 Function QueryTextConnectedAppEndpoints()
     
-    QueryText = "
+    Return "
         |SELECT
         |   AppEndpoints.Ref AS Ref,
         |   AppEndpoints.BasicChannelGuid AS LibraryGuid, 
@@ -313,7 +323,6 @@ Function QueryTextConnectedAppEndpoints()
         |WHERE
         |   AppEndpoints.DeletionMark = False   
         |";
-    Return QueryText;
     
 EndFunction // QueryTextConnectedAppEndpoints()
 
@@ -321,7 +330,7 @@ EndFunction // QueryTextConnectedAppEndpoints()
 // 
 Function QueryTextAppEndpointSettings()
     
-    QueryText = "
+    Return "
         |SELECT
         |   AppEndpoints.Ref              AS Ref,
         |   AppEndpoints.Description      AS Description,
@@ -348,8 +357,7 @@ Function QueryTextAppEndpointSettings()
         |WHERE
         |    AppEndpoints.Ref = &AppEndpoint
         |AND AppEndpoints.DeletionMark = FALSE
-        |";  
-    Return QueryText;
+        |";
     
 EndFunction // QueryTextAppEndpointSettings()
 

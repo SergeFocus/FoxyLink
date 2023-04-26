@@ -1,6 +1,6 @@
 ﻿////////////////////////////////////////////////////////////////////////////////
 // This file is part of FoxyLink.
-// Copyright © 2016-2018 Petro Bazeliuk.
+// Copyright © 2016-2020 Petro Bazeliuk.
 // 
 // This program is free software: you can redistribute it and/or modify 
 // it under the terms of the GNU Affero General Public License as 
@@ -31,16 +31,33 @@
 //
 Procedure OnCreateAtServer(ManagedForm) Export
 
+    Var CopyingValue;
+    
     Object = ManagedForm.Object;
-    If TypeOf(Object.Ref) <> Type("CatalogRef.FL_Exchanges") 
-        OR NOT ValueIsFilled(Object.Ref) Then
-        Return;
+    TypeExchanges = Type("CatalogRef.FL_Exchanges");
+    
+    Ref = Object.Ref;
+    If TypeOf(Ref) <> TypeExchanges 
+        OR NOT ValueIsFilled(Ref) Then
+        
+        Parameters = ManagedForm.Parameters;
+        If NOT Parameters.Property("CopyingValue", CopyingValue) Then
+            Return;
+        EndIf;
+        
+        If TypeOf(CopyingValue) <> TypeExchanges
+            OR NOT ValueIsFilled(CopyingValue) Then
+            Return;    
+        EndIf;
+        
+        Ref = CopyingValue;
+        
     EndIf;
     
     // ManagedForm.UUID is used to remove automatically the value after 
     // closing the form.
-    PlaceEventsDataIntoFormObject(Object, Object.Ref, ManagedForm.UUID);
-    PlaceOperationsDataIntoFormObject(Object, Object.Ref, ManagedForm.UUID);
+    PlaceEventsDataIntoFormObject(Object, Ref, ManagedForm.UUID);
+    PlaceOperationsDataIntoFormObject(Object, Ref, ManagedForm.UUID);
     
 EndProcedure // OnCreateAtServer()
 
@@ -56,7 +73,7 @@ Procedure UpdateEventsView(ManagedForm, FilterParameters) Export
     Events = ManagedForm.Object.Events;
     
     FilterResults = Events.FindRows(FilterParameters);
-    If FilterResults.Count() = 0 Then
+    If NOT ValueIsFilled(FilterResults) Then
         Return;
     EndIf;
    
@@ -108,7 +125,7 @@ Procedure UpdateOperationsView(ManagedForm) Export
             Metadata.Catalogs.FL_Operations, Item.Name);
         FilterResult = Operations.FindRows(New Structure("Operation", 
             Operation));
-        If FilterResult.Count() = 0 Then
+        If NOT ValueIsFilled(FilterResult) Then
             
             // This code is needed to fix problem with platform bug.
             If Item.ChildItems.Find("HiddenGroupSettings") <> Undefined Then
@@ -123,7 +140,7 @@ Procedure UpdateOperationsView(ManagedForm) Export
     EndDo;
     
     // Hide or unhide delete operation button.
-    Items.DeleteOperation.Visible = Operations.Count() > 0;   
+    Items.DeleteOperation.Visible = ValueIsFilled(Operations);   
     
 EndProcedure // UpdateOperationsView()
 
@@ -161,19 +178,20 @@ EndProcedure // FillFormatDescription()
 // Returns a processing result.
 //
 // Parameters:
-//  Exchange - CatalogRef.FL_Exchanges - reference of the FL_Exchanges catalog.
-//  Message  - CatalogRef.FL_Messages  - reference of the FL_Messages catalog.
+//  AppProperties - Structure - see function Catalogs.FL_Channels.NewAppProperties.
+//  Invocation    - Structure - see function Catalogs.FL_Messages.NewInvocation.
 //
 // Returns:
 //  Structure - see fucntion Catalogs.FL_Jobs.NewJobResult. 
 //
-Function ProcessMessage(Exchange, Message) Export
+Function ProcessMessage(AppProperties, Invocation) Export
     
     JobResult = Catalogs.FL_Jobs.NewJobResult();
     
     Try
         
-        Settings = ExchangeSettingsByRefs(Exchange, Message.Operation);
+        Settings = ExchangeSettingsByRefs(AppProperties.AppEndpoint, 
+            Invocation.Operation);
         StreamObject = FL_InteriorUse.NewFormatProcessor(
             Settings.BasicFormatGuid);
         
@@ -181,34 +199,31 @@ Function ProcessMessage(Exchange, Message) Export
         Stream = New MemoryStream;
         StreamObject.Initialize(Stream, Settings.APISchema);
         
-        OutputParameters = NewOutputParameters(Settings, 
-            Catalogs.FL_Messages.DeserializeContext(Message));
+        OutputParameters = NewOutputParameters(Settings, Invocation);
                     
         FL_DataComposition.Output(StreamObject, OutputParameters);
         
-        // Fill MIME-type information.
-        Properties = NewProperties();
-        FillPropertyValues(Properties, Message);
-        Properties.ContentType = StreamObject.FormatMediaType();
-        Properties.ContentEncoding = StreamObject.ContentEncoding;
-        Properties.FileExtension = StreamObject.FormatFileExtension();
-        Properties.MessageId = Message.Code;
-        
+        // Fill out invocation fields.
+        OutInvocation = Catalogs.FL_Messages.NewInvocation();
+        FillPropertyValues(OutInvocation, Invocation);
+        OutInvocation.ContentType = StreamObject.FormatMediaType();
+        OutInvocation.ContentEncoding = StreamObject.ContentEncoding;
+        OutInvocation.FileExtension = StreamObject.FormatFileExtension();
+
         // Close format stream and memory stream.
         StreamObject.Close();
-        Payload = Stream.CloseAndGetBinaryData();
+        OutInvocation.Payload = Stream.CloseAndGetBinaryData();
         
         JobResult.StatusCode = FL_InteriorUseReUse.OkStatusCode();
-        
-        Catalogs.FL_Jobs.AddToJobResult(JobResult, "Payload", Payload);     
-        Catalogs.FL_Jobs.AddToJobResult(JobResult, "Properties", Properties); 
+        Catalogs.FL_Jobs.AddToJobResult(JobResult, "Invocation", OutInvocation); 
 
     Except
         
+        ErrorInformation = ErrorInfo();
         FL_InteriorUse.WriteLog("FoxyLink.Integration.ProcessMessage", 
             EventLogLevel.Error,
             Metadata.Catalogs.FL_Exchanges,
-            ErrorDescription(),
+            ErrorInformation,
             JobResult);
             
     EndTry;
@@ -228,52 +243,41 @@ EndFunction // ProcessMessage()
 //  Structure - see function FL_InteriorUseClientServer.NewFileProperties.
 //
 Function ExportObject(Exchange) Export
-    
-    PayloadRow = Undefined;
-    PropertiesRow = Undefined;
-    
+       
     Invocation = Catalogs.FL_Messages.NewInvocation();
     Invocation.EventSource = "Catalogs.FL_Exchanges.Commands.ExportExchange";
     Invocation.Operation = Catalogs.FL_Operations.Read;
-    Catalogs.FL_Messages.AddToContext(Invocation.Context, "Ref", Exchange, 
-        True);
+    Catalogs.FL_Messages.AddToContext(Invocation, "Ref", Exchange, True);
     
     JobResult = Catalogs.FL_Messages.RouteAndRunOutputResult(Invocation, 
         Catalogs.FL_Exchanges.Self);    
         
-    If JobResult.Success 
-        AND TypeOf(JobResult.Output) = Type("ValueTable") Then
-        PayloadRow = JobResult.Output.Find("Payload", "Name");
-        PropertiesRow = JobResult.Output.Find("Properties", "Name");
-    EndIf;
-        
-    If PayloadRow <> Undefined 
-        AND PropertiesRow <> Undefined Then 
-        
-        FileData = PayloadRow.Value;
-        Properties = PropertiesRow.Value;
-        
-        FileDescription = FL_CommonUse.ObjectAttributeValue(Exchange, 
-            "Description");
+    If JobResult.Success Then
     
-        FileProperties = FL_InteriorUseClientServer.NewFileProperties();
-        FileProperties.Name = StrTemplate("%1%2", FileDescription, 
-            Properties.FileExtension);
-        FileProperties.BaseName = FileDescription;
-        FileProperties.Extension = Properties.FileExtension;
-        FileProperties.Size = FileData.Size();
-        FileProperties.IsFile = True;
-        FileProperties.StorageAddress = PutToTempStorage(FileData);
+        Invocation = Catalogs.FL_Jobs.GetFromJobResult(JobResult, 
+            "Invocation");
         
-        #If MobileAppServer Then
-        FileProperties.ModificationTime = CurrentDate();
-        #ElsIf Server Or ThickClientOrdinaryApplication Or ExternalConnection Then
-        FileProperties.ModificationTime = CurrentSessionDate();
-        #EndIf
+        FileData = Invocation.Payload; 
+        If TypeOf(FileData) = Type("BinaryData") Then 
+            
+            FileDescription = FL_CommonUse.ObjectAttributeValue(Exchange, 
+                "Description");
+        
+            FileProperties = FL_InteriorUseClientServer.NewFileProperties();
+            FileProperties.Name = StrTemplate("%1%2", FileDescription, 
+                Invocation.FileExtension);
+            FileProperties.BaseName = FileDescription;
+            FileProperties.Extension = Invocation.FileExtension;
+            FileProperties.Size = FileData.Size();
+            FileProperties.IsFile = True;
+            FileProperties.StorageAddress = PutToTempStorage(FileData);
+            FileProperties.ModificationTime = CurrentSessionDate();
+            FileProperties.ModificationTimeUTC = CurrentUniversalDate();
+            
+            Return FileProperties;
+            
+        EndIf;
     
-        FileProperties.ModificationTimeUTC = CurrentUniversalDate();
-        Return FileProperties;
-        
     EndIf;
     
     Return Undefined;
@@ -296,14 +300,22 @@ Function AvailableFormats() Export
         If Metadata.DataProcessors.Contains(Item) Then
             
             Try
-            
-                DataProcessor = DataProcessors[Item.Name].Create();                
-                ValueList.Add(DataProcessor.LibraryGuid(),
-                    StrTemplate("%1 (%2), ver. %3", 
-                        DataProcessor.FormatShortName(),
-                        DataProcessor.FormatStandard(),
-                        DataProcessor.Version()));
-            
+                
+                PresentationTemplate = NStr("en='%1 (%2), ver. %3';
+                    |ru='%1 (%2), вер. %3';
+                    |uk='%1 (%2), вер. %3';
+                    |en_CA='%1 (%2), ver. %3'");
+                
+                DataProcessor = DataProcessors[Item.Name].Create();
+                LibraryGuid = DataProcessor.LibraryGuid();
+                FormatName = DataProcessor.FormatShortName();
+                Standard = DataProcessor.FormatStandard();
+                Version = DataProcessor.Version();
+     
+                Presentation = StrTemplate(PresentationTemplate, FormatName, 
+                    Standard, Version);  
+                ValueList.Add(LibraryGuid, Presentation);
+                
             Except
                 
                 FL_CommonUseClientServer.NotifyUser(ErrorDescription());
@@ -359,8 +371,8 @@ EndFunction // NewExchangeSettings()
 // Returns filled structure with output parameters.
 // 
 // Parameters:
-//  Settings - Structure  - see function Catalog.FL_Exchanges.NewExchangeSettings.
-//  Context  - ValueTable - see function Catalogs.FL_Messages.NewContext.
+//  Settings   - Structure - see function Catalog.FL_Exchanges.NewExchangeSettings.
+//  Invocation - Structure - see function Catalogs.FL_Messages.NewInvocation.
 //                  Default value: Undefined.
 //
 // Returns:
@@ -377,15 +389,31 @@ EndFunction // NewExchangeSettings()
 // See also:
 //  DataCompositionProcessor.Initialize in the syntax-assistant.
 //
-Function NewOutputParameters(Settings, Context = Undefined) Export
+Function NewOutputParameters(Settings, Invocation = Undefined) Export
     
     SettingsComposer = New DataCompositionSettingsComposer;
     FL_DataComposition.InitSettingsComposer(SettingsComposer,
         Settings.DataCompositionSchema,
         Settings.DataCompositionSettings);
         
-    If Context <> Undefined Then
-        FL_DataComposition.SetDataToSettingsComposer(SettingsComposer, Context);
+    If Invocation <> Undefined Then
+        
+        Context = Invocation.Context;
+        If NOT ValueIsFilled(Invocation.Context) 
+            AND ValueIsFilled(Invocation.Payload) Then
+            
+            AdditionalParameters = New Structure;
+            AdditionalParameters.Insert("ReadToMap", False);
+            Context = Catalogs.FL_Messages.ReadInvocationPayload(Invocation, 
+                AdditionalParameters);
+                     
+        EndIf;
+
+        If ValueIsFilled(Context) Then
+            FL_DataComposition.SetDataToSettingsComposer(SettingsComposer, 
+                Context);
+        EndIf;
+        
     EndIf;
    
     DataCompositionTemplate = FL_DataComposition.NewTemplateComposerParameters();
@@ -448,43 +476,6 @@ EndFunction // ExchangeSettingsByNames()
 
 #Region ServiceInterface
 
-// Returns a new message properties.
-//
-// Returns: 
-//  Structure - the new message properties with keys:
-//      * AppId           - String - identifier of the application that 
-//                                   produced the message.
-//      * ContentEncoding - String - message content encoding.
-//      * ContentType     - String - message content type.
-//      * CorrelationId   - String - message correlated to this one.
-//      * EventSource     - String - provides access to the event source object name.
-//      * FileExtension   - String - message format file extension.
-//      * MessageId       - String - message identifier as a string. 
-//                                   If applications need to identify messages.
-//      * Operation       - CatalogRef.FL_Operations - the type of change experienced.
-//      * ReplyTo         - String - resource name other apps should send the response to.
-//      * Timestamp       - Number - timestamp of the moment when message was created.
-//      * UserId          - String - user id.
-//
-Function NewProperties() Export
-    
-    Properties = New Structure;
-    Properties.Insert("AppId");
-    Properties.Insert("ContentEncoding");
-    Properties.Insert("ContentType");
-    Properties.Insert("CorrelationId");
-    Properties.Insert("EventSource");
-    Properties.Insert("FileExtension");
-    Properties.Insert("MessageId");
-    Properties.Insert("Operation");
-    Properties.Insert("ReplyTo");
-    Properties.Insert("Timestamp");
-    Properties.Insert("UserId");
-
-    Return Properties;
-    
-EndFunction // NewProperties()
-
 // Returns the external event handler info structure for this module.
 //
 // Returns:
@@ -504,18 +495,18 @@ Function EventHandlerInfo() Export
         EventHandlerInfo.Version);
         
     EventSources = New Array;
-    EventSources.Add(Upper("HTTPService.FL_AppEndpoint"));
-    EventSources.Add(Upper("HTTPСервис.FL_AppEndpoint"));
-    EventSources.Add(Upper("Catalog.*"));
-    EventSources.Add(Upper("Справочник.*"));
-    EventSources.Add(Upper("Document.*"));
-    EventSources.Add(Upper("Документ.*"));
-    EventSources.Add(Upper("ChartOfCharacteristicTypes.*"));
-    EventSources.Add(Upper("ПланВидовХарактеристик.*"));
-    EventSources.Add(Upper("InformationRegister.*"));
-    EventSources.Add(Upper("РегистрСведений.*"));
-    EventSources.Add(Upper("AccumulationRegister.*"));
-    EventSources.Add(Upper("РегистрНакопления.*"));
+    EventSources.Add("HTTPSERVICE.FL_APPENDPOINT");
+    EventSources.Add("HTTPСЕРВИС.FL_APPENDPOINT");
+    EventSources.Add("CATALOG.*");
+    EventSources.Add("СПРАВОЧНИК.*");
+    EventSources.Add("DOCUMENT.*");
+    EventSources.Add("ДОКУМЕНТ.*");
+    EventSources.Add("CHARTOFCHARACTERISTICTYPES.*");
+    EventSources.Add("ПЛАНВИДОВХАРАКТЕРИСТИК.*");
+    EventSources.Add("INFORMATIONREGISTER.*");
+    EventSources.Add("РЕГИСТРСВЕДЕНИЙ.*");
+    EventSources.Add("ACCUMULATIONREGISTER.*");
+    EventSources.Add("РЕГИСТРНАКОПЛЕНИЯ.*");
     
     AvailableOperations = Catalogs.FL_Operations.AvailableOperations();
     For Each AvailableOperation In AvailableOperations Do
@@ -720,13 +711,12 @@ Function ExchangeSettingsByQueryResult(QueryResult, Exchange, Operation)
     
     If QueryResult.IsEmpty() Then
         
-        ErrorMessage = StrTemplate(Nstr("
-                |en='Error: Exchange settings {%1} and/or operation {%2} not found.';
-                |ru='Ошибка: Настройки обмена {%1} и/или операция {%2} не найдены.';
-                |uk='Помилка: Настройки обміну {%1} та/чи операція {%2} не знайдені.';
-                |en_CA='Error: Exchange settings {%1} and/or operation {%2} not found.'"),
-            String(Exchange), String(Operation)); 
-            
+        ErrorTemplate = Nstr("en='Error: Exchange settings {%1} and/or operation {%2} not found.';
+            |ru='Ошибка: Настройки обмена {%1} и/или операция {%2} не найдены.';
+            |uk='Помилка: Настройки обміну {%1} та/чи операція {%2} не знайдені.';
+            |en_CA='Error: Exchange settings {%1} and/or operation {%2} not found.'");
+        ErrorMessage = StrTemplate(ErrorTemplate, String(Exchange), 
+            String(Operation));   
         Raise ErrorMessage;
         
     EndIf;
@@ -734,13 +724,12 @@ Function ExchangeSettingsByQueryResult(QueryResult, Exchange, Operation)
     ValueTable = QueryResult.Unload();
     If ValueTable.Count() > 1 Then
         
-        ErrorMessage = StrTemplate(Nstr("
-                |en='Error: Duplicated records of exchange settings {%1} and operation {%2} are found.';
-                |ru='Ошибка: Обнаружены дублирующиеся настройки обмена {%1} и операция {%2}.';
-                |uk='Помилка: Виявлено, що дублюються налаштування обміну {%1} та операція {%2}.';
-                |en_CA='Error: Duplicated records of exchange settings {%1} and operation {%2} are found.'"),
-            String(Exchange), String(Operation));
-            
+        ErrorTemplate = Nstr("en='Error: Duplicated records of exchange settings {%1} and operation {%2} are found.';
+            |ru='Ошибка: Обнаружены дублирующиеся настройки обмена {%1} и операция {%2}.';
+            |uk='Помилка: Виявлено, що дублюються налаштування обміну {%1} та операція {%2}.';
+            |en_CA='Error: Duplicated records of exchange settings {%1} and operation {%2} are found.'");
+        ErrorMessage = StrTemplate(ErrorTemplate, String(Exchange), 
+            String(Operation));  
         Raise ErrorMessage;
         
     EndIf;
@@ -765,7 +754,7 @@ EndFunction // ExchangeSettingsByQueryResult()
 //
 Function QueryTextExchangeSettingsByRefs()
 
-    QueryText = "
+    Return "
         |SELECT
         |   ExchangeSettings.Ref                AS Ref,
         |   ExchangeSettings.Description        AS Description,
@@ -797,8 +786,7 @@ Function QueryTextExchangeSettingsByRefs()
         |WHERE
         |    ExchangeSettings.Ref = &ExchangeRef
         |AND ExchangeSettings.DeletionMark = FALSE
-        |";  
-    Return QueryText;
+        |";
 
 EndFunction // QueryTextExchangeSettingsByRefs()
 
@@ -806,7 +794,7 @@ EndFunction // QueryTextExchangeSettingsByRefs()
 //
 Function QueryTextExchangeSettingsByNames()
 
-    QueryText = "
+    Return "
         |SELECT
         |   ExchangeSettings.Ref                AS Ref,
         |   ExchangeSettings.Description        AS Description,
@@ -836,8 +824,7 @@ Function QueryTextExchangeSettingsByNames()
         |WHERE
         |    ExchangeSettings.Description = &ExchangeName
         |AND ExchangeSettings.DeletionMark = FALSE
-        |";  
-    Return QueryText;
+        |";
 
 EndFunction // QueryTextExchangeSettingsByNames()
 
